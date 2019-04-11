@@ -368,8 +368,8 @@ static struct bh1749_data bh1749_data;
 
 #ifndef CONFIG_DEVICE_POWER_MANAGEMENT
 DEVICE_AND_API_INIT(bh1749, DT_ROHM_BH1749_0_LABEL, &bh1749_init,
-		    &bh1749_data, NULL, POST_KERNEL,
-		    CONFIG_SENSOR_INIT_PRIORITY, &bh1749_driver_api);
+		    &bh1749_data, NULL, APPLICATION,
+		    91, &bh1749_driver_api);
 #else
 DEVICE_DEFINE(bh1749, DT_ROHM_BH1749_0_LABEL, bh1749_init,
 	      bh1749_power_control, &bh1749_data, NULL,
