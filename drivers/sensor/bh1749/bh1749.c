@@ -20,82 +20,75 @@
 
 LOG_MODULE_REGISTER(BH1749, CONFIG_SENSOR_LOG_LEVEL);
 
-static void bh1749_gpio_callback(struct device *dev,
-				  struct gpio_callback *cb, u32_t pins)
-{
-	struct bh1749_data *drv_data =
-		CONTAINER_OF(cb, struct bh1749_data, gpio_cb);
-	printk("Interrupt\n");
-
-	gpio_pin_disable_callback(dev, DT_ROHM_BH1749_0_INT_GPIOS_PIN);
-
-#ifdef CONFIG_BH1749_TRIGGER
-	k_work_submit(&drv_data->work);
-#else
-	k_sem_give(&drv_data->data_sem);
-#endif
-}
-
 static int bh1749_sample_fetch(struct device *dev, enum sensor_channel chan)
 {
 	struct bh1749_data *data = dev->driver_data;
+	u32_t err;
 	u8_t status;
+	u8_t buf;
 
 	if (chan != SENSOR_CHAN_ALL) {
 		LOG_ERR("Unsupported sensor channel");
 		return -ENOTSUP;
 	}
 
-	printk("Fetching...\n");
-
-#ifndef CONFIG_BH1749_TRIGGER
-	gpio_pin_enable_callback(data->gpio,
-				 DT_ROHM_BH1749_0_INT_GPIOS_PIN);
-
-	if (i2c_reg_update_byte(data->i2c, DT_ROHM_BH1749_0_BASE_ADDRESS,
-				BH1749_INTERRUPT,
-				BH1749_INTERRUPT_ENABLE_Msk,
-				BH1749_INTERRUPT_ENABLE_ENABLE)) {
-		LOG_ERR("Could not enable RGB sampling.");
-		return -EIO;
-	}
-
-	u8_t buf;
-	if (i2c_reg_read_byte(data->i2c, DT_ROHM_BH1749_0_BASE_ADDRESS,
-				BH1749_INTERRUPT,
-				&buf)) {
-		LOG_ERR("Could not enable RGB sampling.");
-		return -EIO;
-	}
-
-	printk("BH1749_INTERRUPT: 0x%02x\n", buf);
-
-	//k_sem_take(&data->data_sem, K_FOREVER);
-#endif
+	LOG_DBG("Fetching sample...\n");
 
 	if (i2c_reg_read_byte(data->i2c, DT_ROHM_BH1749_0_BASE_ADDRESS,
 			      BH1749_MODE_CONTROL2, &status)) {
 		return -EIO;
 	}
+	
+	LOG_DBG("MODE_CONTROL_2 %x", status);
 
-	printk("\n\nBH1749_MODE_CONTROL2: 0x%02x\n", status);
-	// if ((status & BH1749_MODE_CONTROL2_VALID_Msk) == 0) {
-	// 	LOG_ERR("No valid data to fetch.");
-	// 	return -EIO;
-	// }
-
-	i2c_burst_read(data->i2c, DT_ROHM_BH1749_0_BASE_ADDRESS,
-		BH1749_RED_DATA_LSB,
-		(u8_t *)data->sample_rgb_ir, 8);
-
-#ifndef CONFIG_BH1749_TRIGGER
-	if (i2c_reg_update_byte(data->i2c, DT_ROHM_BH1749_0_BASE_ADDRESS,
-				BH1749_INTERRUPT,
-				BH1749_INTERRUPT_ENABLE_Msk,
-				BH1749_INTERRUPT_ENABLE_ENABLE)) {
+	if ((status & (BH1749_MODE_CONTROL2_VALID_Msk)) == 0) {
+		LOG_ERR("No valid data to fetch.");
 		return -EIO;
 	}
-#endif
+
+	/* TODO: Fix offset for IR bytes */
+	i2c_burst_read(data->i2c, DT_ROHM_BH1749_0_BASE_ADDRESS,
+		BH1749_RED_DATA_LSB,
+		(u8_t *)data->sample_rgb_ir, 10);
+
+	if (IS_ENABLED(CONFIG_BH1749_TRIGGER)) {
+		
+		if (i2c_reg_update_byte(
+			    data->i2c, DT_ROHM_BH1749_0_BASE_ADDRESS,
+			    BH1749_INTERRUPT, BH1749_INTERRUPT_ENABLE_Msk,
+			    BH1749_INTERRUPT_ENABLE_DISABLE)) {
+			LOG_ERR("Could not disable sensor interrupt.");
+			return -EIO;
+		}
+
+		/* Verify if INT_ENABLE is set */
+		if (i2c_reg_read_byte(data->i2c, DT_ROHM_BH1749_0_BASE_ADDRESS,
+				      BH1749_INTERRUPT, &buf)) {
+			LOG_ERR("Could not disable sensor interrupt.");
+			return -EIO;
+		}
+
+		err = gpio_pin_enable_callback(data->gpio,
+					       DT_ROHM_BH1749_0_INT_GPIOS_PIN);
+		if (err) {
+			LOG_ERR("Could not enable pin callback");
+		}
+
+		if (i2c_reg_update_byte(
+			    data->i2c, DT_ROHM_BH1749_0_BASE_ADDRESS,
+			    BH1749_INTERRUPT, BH1749_INTERRUPT_ENABLE_Msk,
+			    BH1749_INTERRUPT_ENABLE_ENABLE)) {
+			LOG_ERR("Could not enable sensor interrupt.");
+			return -EIO;
+		}
+
+		/* Verify if INT_ENABLE is set */
+		if (i2c_reg_read_byte(data->i2c, DT_ROHM_BH1749_0_BASE_ADDRESS,
+				      BH1749_INTERRUPT, &buf)) {
+			LOG_ERR("Could not enable sensor interrupt.");
+			return -EIO;
+		}
+	}
 
 	return 0;
 }
@@ -108,19 +101,23 @@ static int bh1749_channel_get(struct device *dev,
 
 	switch (chan) {
 	case SENSOR_CHAN_RED:
-		val->val1 = sys_le16_to_cpu(data->sample_rgb_ir[0]);
+		val->val1 = sys_le16_to_cpu(
+			data->sample_rgb_ir[BH1749_RGB_BYTE_POS_RED]);
 		val->val2 = 0;
 		break;
 	case SENSOR_CHAN_GREEN:
-		val->val1 = sys_le16_to_cpu(data->sample_rgb_ir[1]);
+		val->val1 = sys_le16_to_cpu(
+			data->sample_rgb_ir[BH1749_RGB_BYTE_POS_GREEN]);
 		val->val2 = 0;
 		break;
 	case SENSOR_CHAN_BLUE:
-		val->val1 = sys_le16_to_cpu(data->sample_rgb_ir[2]);
+		val->val1 = sys_le16_to_cpu(
+			data->sample_rgb_ir[BH1749_RGB_BYTE_POS_BLUE]);
 		val->val2 = 0;
 		break;
 	case SENSOR_CHAN_IR:
-		val->val1 = sys_le16_to_cpu(data->sample_rgb_ir[3]);
+		val->val1 = sys_le16_to_cpu(
+			data->sample_rgb_ir[BH1749_RGB_BYTE_POS_IR]);
 		val->val2 = 0;
 		break;
 	default:
@@ -166,67 +163,6 @@ static int bh1749_check(struct device *dev)
 	LOG_DBG("Part ID: 0x%02x", buf);
 	k_sleep(100);
 
-	return 0;
-}
-
-static int bh1749_interrupt_init(struct device *dev)
-{
-	int err;
-	struct bh1749_data *drv_data = dev->driver_data;
-
-	/* Setup gpio interrupt */
-	drv_data->gpio =
-		device_get_binding(DT_ROHM_BH1749_0_INT_GPIOS_CONTROLLER);
-	if (drv_data->gpio == NULL) {
-		LOG_ERR("Failed to get binding to %s device!",
-			    DT_ROHM_BH1749_0_INT_GPIOS_CONTROLLER);
-		return -EINVAL;
-	}
-
-	err = gpio_pin_configure(drv_data->gpio, DT_ROHM_BH1749_0_INT_GPIOS_PIN,
-			   GPIO_DIR_IN | GPIO_INT | GPIO_INT_LEVEL |
-			   GPIO_INT_ACTIVE_LOW  | GPIO_PUD_PULL_UP);
-	if (err) {
-		LOG_DBG("Failed to configure interrupt GPIO");
-		return -EIO;
-	}
-
-	gpio_init_callback(&drv_data->gpio_cb,
-			   bh1749_gpio_callback,
-			   BIT(DT_ROHM_BH1749_0_INT_GPIOS_PIN));
-
-	err = gpio_add_callback(drv_data->gpio, &drv_data->gpio_cb);
-	if (err) {
-		LOG_DBG("Failed to set GPIO callback");
-		return err;
-	}
-
-	err = i2c_reg_update_byte(drv_data->i2c, DT_ROHM_BH1749_0_BASE_ADDRESS,
-				  BH1749_INTERRUPT,
-				  BH1749_INTERRUPT_LATCH,
-				  BH1749_INTERRUPT_LATCH);
-	if (err) {
-		LOG_ERR("Interrupts could not be enabled.");
-		return -EIO;
-	}
-
-#ifdef CONFIG_BH1749_TRIGGER
-	drv_data->work.handler = bh1749_work_fn;
-	drv_data->dev = dev;
-
-	err = i2c_reg_update_byte(drv_data->i2c, DT_ROHM_BH1749_0_BASE_ADDRESS,
-				BH1749_INTERRUPT,
-				BH1749_INTERRUPT_ENABLE_Msk |
-				BH1749_INTERRUPT_INT_SOURCE_Msk,
-				BH1749_INTERRUPT_ENABLE_ENABLE |
-				BH1749_INTERRUPT_INT_SOURCE_RED);
-	if (err) {
-		LOG_ERR("Interrupts could not be enabled.");
-		return -EIO;
-	}
-#else
-	k_sem_init(&drv_data->data_sem, 0, UINT_MAX);
-#endif
 	return 0;
 }
 
@@ -282,11 +218,15 @@ static int bh1749_rgb_gain_set(struct device *dev, u8_t value)
 				   value);
 }
 
-static int bh1749_rgb_measurement_enable(struct device *dev) {
+static int bh1749_rgb_measurement_enable(struct device *dev, bool enable) {
+	int en = enable ?
+					   BH1749_MODE_CONTROL2_RGB_EN_ENABLE :
+					   BH1749_MODE_CONTROL2_RGB_EN_DISABLE;
+
 	return i2c_reg_update_byte(dev, DT_ROHM_BH1749_0_BASE_ADDRESS,
-				BH1749_MODE_CONTROL2,
-				BH1749_MODE_CONTROL2_RGB_EN_Msk,
-				BH1749_MODE_CONTROL2_RGB_EN_ENABLE);
+				   BH1749_MODE_CONTROL2,
+				   BH1749_MODE_CONTROL2_RGB_EN_Msk,
+				   en);
 }
 
 static int bh1749_init(struct device *dev)
@@ -320,18 +260,27 @@ static int bh1749_init(struct device *dev)
 		return -EIO;
 	}
 
-	err = bh1749_interrupt_init(dev);
+	err = bh1749_rgb_measurement_enable(data->i2c, true);
+	if (err) {
+		LOG_ERR("Could not set measurement mode.");
+		return -EIO;
+	}
+#ifdef CONFIG_BH1749_TRIGGER
+	err = bh1749_gpio_interrupt_init(dev);
 	if (err) {
 		LOG_ERR("Failed to initialize interrupt with error %d", err);
 		return -EIO;
 	}
 
-	LOG_DBG("Interrupts initialized");
+	LOG_DBG("GPIO Sense Interrupts initialized");
+#endif /* CONFIG_BH1749_TRIGGER */
 
+
+	/* Interrupt line goes active after every measurement */
 	if (i2c_reg_update_byte(data->i2c, DT_ROHM_BH1749_0_BASE_ADDRESS,
 				BH1749_PERSISTENCE,
 				BH1749_PERSISTENCE_PERSISTENCE_Msk,
-				BH1749_PERSISTENCE_PERSISTENCE_ACTIVE_END)) {
+				BH1749_PERSISTENCE_PERSISTENCE_8_SAMPLES)) {
 		LOG_ERR("Could not set persistence configuration.");
 		return -EIO;
 	}
@@ -339,14 +288,8 @@ static int bh1749_init(struct device *dev)
 	if (i2c_reg_update_byte(data->i2c, DT_ROHM_BH1749_0_BASE_ADDRESS,
 				BH1749_MODE_CONTROL1,
 				BH1749_MODE_CONTROL1_MEAS_MODE_Msk,
-				0x00)) {
-		LOG_ERR("Could not set persistence configuration.");
-		return -EIO;
-	}
-
-	err = bh1749_rgb_measurement_enable(data->i2c);
-	if (err) {
-		LOG_ERR("Could not set measurement mode.");
+				BH1749_MODE_CONTROL1_MEAS_MODE_120MS)) {
+		LOG_ERR("Could not set measurement mode configuration.");
 		return -EIO;
 	}
 
@@ -367,9 +310,9 @@ static const struct sensor_driver_api bh1749_driver_api = {
 static struct bh1749_data bh1749_data;
 
 #ifndef CONFIG_DEVICE_POWER_MANAGEMENT
-DEVICE_AND_API_INIT(bh1749, DT_ROHM_BH1749_0_LABEL, &bh1749_init,
-		    &bh1749_data, NULL, APPLICATION,
-		    91, &bh1749_driver_api);
+DEVICE_AND_API_INIT(bh1749, DT_ROHM_BH1749_0_LABEL, &bh1749_init, &bh1749_data,
+		    NULL, APPLICATION, CONFIG_SENSOR_INIT_PRIORITY,
+		    &bh1749_driver_api);
 #else
 DEVICE_DEFINE(bh1749, DT_ROHM_BH1749_0_LABEL, bh1749_init,
 	      bh1749_power_control, &bh1749_data, NULL,

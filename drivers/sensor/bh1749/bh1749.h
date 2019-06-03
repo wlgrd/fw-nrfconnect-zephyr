@@ -34,7 +34,7 @@
 
 /* BH1749_SYSTEM_CONTROL */
 #define BH1749_SYSTEM_CONTROL_PART_ID_Msk		GENMASK(5, 0)
-#define BH1749_SYSTEM_CONTROL_PART_ID			0x0B
+#define BH1749_SYSTEM_CONTROL_PART_ID			0x0D
 #define BH1749_SYSTEM_CONTROL_SW_RESET_Msk		BIT(6)
 #define BH1749_SYSTEM_CONTROL_SW_RESET			BIT(6)
 #define BH1749_SYSTEM_CONTROL_INT_RESET_Msk		BIT(7)
@@ -82,6 +82,12 @@
 #define BH1749_PERSISTENCE_PERSISTENCE_4_SAMPLES	0x02
 #define BH1749_PERSISTENCE_PERSISTENCE_8_SAMPLES	0x03
 
+/* BH1749 RGB/IR SAMPLE POSITIONS  */
+#define BH1749_RGB_BYTE_POS_RED				0
+#define BH1749_RGB_BYTE_POS_GREEN			1
+#define BH1749_RGB_BYTE_POS_BLUE			2
+#define BH1749_RGB_BYTE_POS_IR				4
+
 /* Manufacturer ID */
 #define BH1749_MANUFACTURER_ID_DEFAULT			0xE0
 
@@ -91,13 +97,12 @@ struct bh1749_data {
 	struct gpio_callback gpio_cb;
 	struct k_work work;
 	struct device *dev;
-	u16_t sample_rgb_ir[4];
+	u16_t sample_rgb_ir[5];
 	u8_t pdata;
 
 #ifdef CONFIG_BH1749_TRIGGER
-	sensor_trigger_handler_t p_th_handler;
-	struct sensor_trigger p_th_trigger;
-#else
+	sensor_trigger_handler_t trg_handler;
+	struct sensor_trigger trigger;
 	struct k_sem data_sem;
 #endif
 };
@@ -113,6 +118,8 @@ int bh1749_attr_set(struct device *dev,
 int bh1749_trigger_set(struct device *dev,
 		       const struct sensor_trigger *trig,
 		       sensor_trigger_handler_t handler);
+
+int bh1749_gpio_interrupt_init(struct device *dev);
 #endif /* CONFIG_BH1749_TRIGGER */
 
 #endif /* ZEPHYR_DRIVERS_SENSOR_BH1749_H_ */
